@@ -1,13 +1,18 @@
-"""One-shot 15-min AVWAP scanner for NIFTY + BANKNIFTY (no orders).
+"""One-shot 15-min ANCHORED VWAP scanner for NIFTY + BANKNIFTY (no orders).
 
-Prints ATM ± N ITM contracts with last completed 15m close, lifetime AVWAP
-(typical price HLC/3 from first tradable 15m bar), Δ, and trigger hint.
+This is NOT session VWAP. AVWAP is cumulative from a fixed anchor candle
+and never resets at 09:15.
+
+Default --days 10: anchor = first completed 15m bar in the last 10 calendar
+days (easy to drop the same anchor on a chart). Also prints lifetime AVWAP
+from the first tradable bar in the fetch (strategy rule).
 
 Usage:
-  DHAN_CLIENT_ID=... DHAN_ACCESS_TOKEN=... python tools/sample_scanner.py
+  DHAN_CLIENT_ID=... DHAN_ACCESS_TOKEN=... python tools/sample_scanner.py --days 10
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import os
 import sys
@@ -56,6 +61,11 @@ def trigger(st, prev_c, prev_a, last):
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--days", type=int, default=10,
+                    help="Anchor AVWAP at the first 15m bar of this lookback (default 10)")
+    args = ap.parse_args()
+
     cfg = load_config()
     cid = os.environ.get("DHAN_CLIENT_ID") or cfg["dhan"]["client_id"]
     tok = os.environ.get("DHAN_ACCESS_TOKEN") or cfg["dhan"]["access_token"]
@@ -72,14 +82,17 @@ def main() -> int:
 
     now = now_ist()
     today = now.date()
-    from_dt = (now - timedelta(days=90)).replace(hour=9, minute=0, second=0, microsecond=0)
+    from_dt = (now - timedelta(days=max(args.days, 1))).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
     itm_n = int(cfg.get("strategy", {}).get("itm_strikes_per_side", 4))
     cur = candle_start_for(now, 15)
     drop_ts = epoch(cur) if cur is not None else None
 
     rows = []
-    print(f"Clock {now.strftime('%Y-%m-%d %H:%M IST')}  history from {from_dt.date()}  15m only")
-    print(f"Formula: AVWAP = Σ((H+L+C)/3 * V) / ΣV  from first tradable 15m candle (NOT session VWAP)\n")
+    print(f"Clock {now.strftime('%Y-%m-%d %H:%M IST')}  15-minute ANCHORED VWAP (not session VWAP)")
+    print(f"Anchor window: first 15m bar on/after {from_dt.date()}  (last {args.days} days)")
+    print("Formula: AVWAP = Σ((H+L+C)/3 * V) / ΣV  — cumulative, never resets daily\n")
 
     for u, weekly_n in (("NIFTY", 2), ("BANKNIFTY", 0)):
         uid = bundle.underlying_ids.get(u)
