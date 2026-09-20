@@ -168,14 +168,19 @@ class Database:
         )
 
     def get_candles(self, security_id: str, after_ts: int = 0, limit: int | None = None):
-        sql = (
-            "SELECT * FROM candles WHERE security_id=? AND ts>?"
-            " ORDER BY ts ASC"
-        )
-        rows = self._query(sql, (security_id, after_ts))
+        """Return candles oldest→newest. `limit` keeps the NEWEST N rows
+        (the live chart / signal comparison), not the oldest N."""
         if limit:
-            rows = rows[:limit]
-        return rows
+            rows = self._query(
+                "SELECT * FROM candles WHERE security_id=? AND ts>? "
+                "ORDER BY ts DESC LIMIT ?",
+                (security_id, after_ts, int(limit)),
+            )
+            return list(reversed(rows))
+        return self._query(
+            "SELECT * FROM candles WHERE security_id=? AND ts>? ORDER BY ts ASC",
+            (security_id, after_ts),
+        )
 
     # ---------------------------------------------------------------- avwap
     def get_avwap_state(self, security_id: str):

@@ -55,8 +55,15 @@ class DhanCandlePollFeed:
         self.cfg = cfg
         self.clock = clock
         self.interval = int(cfg.get("strategy", {}).get("candle_interval_minutes", 15))
-        self.history_start_mode = cfg.get("market_data", {}).get("history_start", "month_start")
+        self.history_start_mode = cfg.get("market_data", {}).get("history_start", "first_candle")
         self.lookback_days = int(cfg.get("market_data", {}).get("history_lookback_days_fallback", 5))
+        # How far back to request when anchoring at the contract's first
+        # tradable candle. Weekly NIFTY options list before month-start;
+        # 90 calendar days covers listing → expiry for index weeklies and
+        # monthlies. Dhan serves empty days as empty; extra lookback is cheap.
+        self.history_lookback_days = int(
+            cfg.get("market_data", {}).get("history_lookback_days", 90)
+        )
         # security_id -> candle-API instrument (set by the app after the
         # instrument master loads; index options need OPTIDX, stocks OPTSTK)
         self.instrument_map: dict[str, str] = {}
@@ -68,9 +75,18 @@ class DhanCandlePollFeed:
         return self.clock.now() if self.clock is not None else now_ist()
 
     def history_from_dt(self, now: datetime) -> datetime:
-        """AVWAP anchor = first tradable candle of the contract. New monthly
-        expiries list at the start of the month, so start there; the caller
-        falls back to a shorter window if the API cannot serve that far back."""
+        """Window start for the AVWAP history fetch.
+
+        `first_candle` (default): request `history_lookback_days` back so
+        Dhan returns the contract's real first tradable 15-min bar (weeklies
+        list before calendar month-start; monthlies list ~1 month out).
+        `month_start`: first calendar day of the current month (legacy).
+        Anything else: the short fallback lookback.
+        """
+        if self.history_start_mode in ("first_candle", "listing", "full"):
+            return (now - timedelta(days=self.history_lookback_days)).replace(
+                hour=9, minute=0, second=0, microsecond=0
+            )
         if self.history_start_mode == "month_start":
             return now.replace(day=1, hour=9, minute=0, second=0, microsecond=0)
         return (now - timedelta(days=self.lookback_days)).replace(

@@ -582,11 +582,12 @@ class TraderApp:
                         "UPDATE avwap_state SET symbol=? WHERE security_id=?",
                         (c.name, sec))
         from_dt = self._history_from_dt(now)
-        need = [
-            s for s in monitored
-            if self.db.get_avwap_state(s) is None
-        ]
-        log.info("AVWAP initialization needed for %d/%d contracts", len(need), len(monitored))
+        # Always (re)fetch history so (a) late-anchored states get rebuilt
+        # from the contract's first tradable 15-min candle, (b) the dashboard
+        # chart is drawn from the SAME candles the AVWAP used.
+        need = list(monitored)
+        log.info("AVWAP history fetch for %d monitored contracts (from %s)",
+                 len(need), from_dt.strftime("%Y-%m-%d"))
         self._startup("bootstrapping", f"AVWAP history 0/{len(need)}", 0, len(need))
         hist_gap = float(cfg_get(self.cfg, "market_data.history_request_gap_seconds", 1.0))
         partial = set(self.db.kv_get("avwap_partial_history", []) or [])
@@ -609,7 +610,28 @@ class TraderApp:
                     if cur_start is not None:
                         history = [x for x in history if x.ts < epoch(cur_start)]
                     if history:
-                        self.avwap.initialize_from_candles(sec, history, symbol=sym)
+                        existing = self.db.get_avwap_state(sec)
+                        first_ts = history[0].ts
+                        late = (
+                            existing is not None
+                            and existing["anchor_ts"]
+                            and int(existing["anchor_ts"]) > first_ts
+                        )
+                        if existing is None or late:
+                            if late:
+                                log.warning(
+                                    "AVWAP rebuild %s: stored anchor %s is AFTER first "
+                                    "tradable candle %s - rebuilding from full 15-min history",
+                                    sym,
+                                    from_epoch(int(existing["anchor_ts"])).strftime("%Y-%m-%d %H:%M"),
+                                    from_epoch(first_ts).strftime("%Y-%m-%d %H:%M"),
+                                )
+                                self.avwap.rebuild_from_candles(sec, history, symbol=sym)
+                            else:
+                                self.avwap.initialize_from_candles(sec, history, symbol=sym)
+                        else:
+                            self.avwap.initialize_from_candles(sec, history, symbol=sym)
+                        self._persist_history_candles(sec, history)
                         done += 1
                     if not full_range:
                         partial.add(sec)
@@ -617,8 +639,10 @@ class TraderApp:
                                   "candle %s, wanted %s) - flagged for re-anchor via "
                                   "tools/reanchor_avwap.py",
                                   sym,
-                                  from_epoch(history[0].ts).strftime("%Y-%m-%d %H:%M"),
+                                  from_epoch(history[0].ts).strftime("%Y-%m-%d %H:%M") if history else "n/a",
                                   from_dt.strftime("%Y-%m-%d"))
+                    else:
+                        partial.discard(sec)
                 else:
                     partial.add(sec)
                     log.error("AVWAP init: no history at all for %s - state stays "
@@ -635,12 +659,29 @@ class TraderApp:
         if self.source == "mock":
             # the mock generates history from the first trading day of the month
             return now.replace(day=1, hour=9, minute=0, second=0)
-        mode = cfg_get(self.cfg, "market_data.history_start", "month_start")
+        if hasattr(self.feed, "history_from_dt"):
+            return self.feed.history_from_dt(now)
+        mode = cfg_get(self.cfg, "market_data.history_start", "first_candle")
+        lookback = int(cfg_get(self.cfg, "market_data.history_lookback_days", 90))
+        if mode in ("first_candle", "listing", "full"):
+            return (now - timedelta(days=lookback)).replace(hour=9, minute=0, second=0)
         if mode == "month_start":
             return now.replace(day=1, hour=9, minute=0, second=0)
         return (now - timedelta(days=int(cfg_get(self.cfg, "market_data.history_lookback_days_fallback", 5)))).replace(
             hour=9, minute=0, second=0
         )
+
+    def _persist_history_candles(self, sec: str, candles: list) -> None:
+        """Write every completed 15-min bar + the AVWAP AFTER that bar so the
+        dashboard chart is the same series the engine used for signals."""
+        from strategy.avwap import AvwapState
+        st = AvwapState(security_id=sec)
+        for c in sorted(candles, key=lambda x: x.ts):
+            av = st.update(c)
+            try:
+                self.db.save_candle(c.to_row(avwap=av))
+            except Exception:
+                log.warning("history candle persist failed for %s ts=%s", sec, c.ts, exc_info=True)
 
     def _seed_processed_from_db(self) -> None:
         """Remember which candles are already processed. A previous day's

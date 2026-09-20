@@ -143,7 +143,15 @@ class DhanMarketData:
                 security_id, type(data).__name__, str(resp)[:300],
             )
         out.sort(key=lambda c: c.ts)
-        return out
+        # Dhan occasionally repeats a grid timestamp (first-trade snap +
+        # official 09:15 bar). Keep the LAST row per ts so AVWAP never
+        # double-counts volume on the same 15-min window.
+        deduped: list[Candle] = []
+        by_ts: dict[int, Candle] = {}
+        for c in out:
+            by_ts[c.ts] = c
+        deduped = [by_ts[t] for t in sorted(by_ts)]
+        return deduped
 
     # -------------------------------------------------------------- quotes
     def quotes(self, security_ids: list[str]) -> dict[str, Quote]:

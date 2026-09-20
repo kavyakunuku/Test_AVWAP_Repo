@@ -124,6 +124,13 @@ class AvwapStore:
         because update() ignores candles older than its last candle)."""
         self.db._exec("DELETE FROM avwap_state WHERE security_id=?", (security_id,))
 
+    def rebuild_from_candles(self, security_id: str, candles: list[Candle],
+                             symbol: Optional[str] = None) -> AvwapState:
+        """Drop any existing (possibly late-anchored) state and rebuild
+        from the full candle series, oldest → newest."""
+        self.delete(security_id)
+        return self.initialize_from_candles(security_id, candles, symbol=symbol)
+
     def initialize_from_candles(self, security_id: str, candles: list[Candle],
                                 symbol: Optional[str] = None) -> AvwapState:
         """LIVE AVWAP INITIALIZATION (spec §15).

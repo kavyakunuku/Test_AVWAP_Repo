@@ -110,6 +110,52 @@ def test_initialize_from_history_matches_incremental(tmp_path):
     assert abs(hist3.last_avwap - ref.last_avwap) < 1e-12
 
 
+def test_rebuild_from_candles_drops_late_anchor(tmp_path):
+    from storage.database import Database
+
+    db = Database(str(tmp_path / "r.db"))
+    store = AvwapStore(db)
+    late = [
+        C("X", 20, 9, 15, close=90, vol=10),
+        C("X", 20, 9, 30, close=92, vol=10),
+    ]
+    store.initialize_from_candles("X", late)
+    assert store.get("X").anchor_ts == ts(20, 9, 15)
+    full = [
+        C("X", 15, 9, 15, close=100, vol=10),
+        C("X", 15, 9, 30, close=104, vol=10, open_=103, high=105, low=103),
+        C("X", 20, 9, 15, close=90, vol=10),
+        C("X", 20, 9, 30, close=92, vol=10),
+    ]
+    rebuilt = store.rebuild_from_candles("X", full)
+    assert rebuilt.anchor_ts == ts(15, 9, 15)
+    ref = AvwapState(security_id="X")
+    for c in full:
+        ref.update(c)
+    assert abs(rebuilt.last_avwap - ref.last_avwap) < 1e-12
+    assert rebuilt.cumulative_volume == ref.cumulative_volume
+
+
+def test_typical_price_is_hlc_over_3():
+    c = C("X", 15, 9, 15, close=104, vol=10, open_=100, high=105, low=103)
+    assert abs(c.typical_price - (105 + 103 + 104) / 3.0) < 1e-12
+
+
+def test_get_candles_limit_keeps_newest(tmp_path):
+    from storage.database import Database
+
+    db = Database(str(tmp_path / "c.db"))
+    for i, m in enumerate((15, 30, 45, 0)):
+        day, hour = (15, 9) if m else (15, 10)
+        mm = m if m else 0
+        c = C("X", day, hour if m else 10, mm if m else 0, close=100 + i, vol=1)
+        db.save_candle(c.to_row(avwap=100 + i))
+    rows = db.get_candles("X", limit=2)
+    assert len(rows) == 2
+    assert rows[0]["close"] == 102
+    assert rows[1]["close"] == 103
+
+
 def test_state_persists_and_reloads(tmp_path):
     from storage.database import Database
 
